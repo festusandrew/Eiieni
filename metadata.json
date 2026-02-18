@@ -1,0 +1,9 @@
+{
+  "name": "Elenii Shepherd",
+  "description": "A voice-first AI assistant for navigation and accessibility.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
