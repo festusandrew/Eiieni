@@ -20,6 +20,7 @@ export enum AppState {
   SETTINGS_PROFILE = 'SETTINGS_PROFILE', // User Profile & Name
   SETTINGS_LANGUAGE = 'SETTINGS_LANGUAGE',
   SETTINGS_SUBSCRIPTION = 'SETTINGS_SUBSCRIPTION',
+  SETTINGS_BLUETOOTH = 'SETTINGS_BLUETOOTH',
   PAYWALL = 'PAYWALL',
   SUBSCRIPTION_CONFIRM = 'SUBSCRIPTION_CONFIRM',
   HELP = 'HELP',
@@ -50,4 +51,8 @@ export interface UserSettings {
   destination?: string;
   useEsp32Cam: boolean;
   esp32CamUrl: string;
+  bluetoothDeviceName?: string;
+  bluetoothDeviceAddress?: string;
+  bluetoothGattService?: string;
+  bluetoothGattCharacteristic?: string;
 }

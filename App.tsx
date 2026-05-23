@@ -2,11 +2,17 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AppState, Language, UserSettings, Reminder } from './types';
 import { analyzeScene, chatWithElenii, extractTextFromImage, getWalkingDirections } from './services/geminiService';
 import { Visualizer } from './components/Visualizer';
+import { MobileSimulator } from './components/MobileSimulator';
+import BluetoothService, { BleDevice } from './services/bluetoothService';
 
 // --- Assets & Icons ---
 const IconMic = () => <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>;
 const IconSettings = () => <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
-const IconSensor = ({ connected }: { connected: boolean }) => <svg className={`w-5 h-5 ${connected ? 'text-[#2D6A94]' : 'text-zinc-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>;
+const IconBluetooth = ({ connected }: { connected: boolean }) => (
+  <svg className={`w-5 h-5 ${connected ? 'text-[#2D6A94] drop-shadow-[0_0_8px_rgba(45,106,148,0.5)]' : 'text-zinc-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7l10 10-5 5V2l5 5L7 17" />
+  </svg>
+);
 const IconNavigation = () => <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
 const IconArrowLeft = () => <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>;
 const IconCheck = () => <svg className="w-5 h-5 text-[#2D6A94]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>;
@@ -66,6 +72,14 @@ export default function App() {
   const [navSteps, setNavSteps] = useState<string[]>([]);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
+  // Bluetooth & Cane Telemetry States
+  const [connectedBleDevice, setConnectedBleDevice] = useState<BleDevice | null>(null);
+  const [currentDistance, setCurrentDistance] = useState<number | null>(null);
+  const [obstacleWarning, setObstacleWarning] = useState<boolean>(false);
+  const [discoveredDevices, setDiscoveredDevices] = useState<BleDevice[]>([]);
+  const [isBleScanning, setIsBleScanning] = useState<boolean>(false);
+  const lastObstacleSpeakRef = useRef<number>(0);
+
   // Document Reader State
   const [readerText, setReaderText] = useState<string>("");
   const [isReading, setIsReading] = useState(false);
@@ -85,51 +99,68 @@ export default function App() {
 
   // --- Helpers ---
   const speak = useCallback((text: string, force: boolean = false) => {
-    if (window.speechSynthesis.speaking && !force) window.speechSynthesis.cancel();
-    
-    // Reset reading state if we were reading a document
-    setIsReading(false);
+    if (!window.speechSynthesis) {
+        console.warn("speechSynthesis not supported on this platform: ", text);
+        return;
+    }
+    try {
+        if (window.speechSynthesis.speaking && !force) window.speechSynthesis.cancel();
+        
+        // Reset reading state if we were reading a document
+        setIsReading(false);
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.volume = settings.volume;
-    utterance.lang = settings.language;
-    
-    utterance.onend = () => {
-        // Just in case we want to hook into end of speech
-    };
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.volume = settings.volume;
+        utterance.lang = settings.language;
+        
+        utterance.onend = () => {
+            // Just in case we want to hook into end of speech
+        };
 
-    window.speechSynthesis.speak(utterance);
-    
-    // Log for UI
-    if (text !== "Listening..." && !text.startsWith("Settings")) {
-        // Don't overwrite the main display if we are in news/radio mode usually, 
-        // but for this implementation we might want to show what is being spoken lightly or just keep the UI static
+        window.speechSynthesis.speak(utterance);
+    } catch (e) {
+        console.error("Speech synthesis failed", e);
     }
   }, [settings.language, settings.volume]);
 
   const readerSpeak = useCallback((text: string) => {
-      // Specialized speaker for Document Reader that tracks state
-      if (window.speechSynthesis.speaking) {
-          window.speechSynthesis.cancel();
-          setIsReading(false);
+      if (!window.speechSynthesis) {
+          console.warn("speechSynthesis not supported: ", text);
           return;
       }
-      
-      if (!text) return;
+      try {
+          // Specialized speaker for Document Reader that tracks state
+          if (window.speechSynthesis.speaking) {
+              window.speechSynthesis.cancel();
+              setIsReading(false);
+              return;
+          }
+          
+          if (!text) return;
 
-      setIsReading(true);
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.volume = settings.volume;
-      utterance.lang = settings.language;
-      utterance.onend = () => setIsReading(false);
-      utterance.onerror = () => setIsReading(false);
-      window.speechSynthesis.speak(utterance);
+          setIsReading(true);
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.volume = settings.volume;
+          utterance.lang = settings.language;
+          utterance.onend = () => setIsReading(false);
+          utterance.onerror = () => setIsReading(false);
+          window.speechSynthesis.speak(utterance);
+      } catch (e) {
+          console.error("Reader Speech synthesis failed", e);
+          setIsReading(false);
+      }
   }, [settings.volume, settings.language]);
 
   const transitionTo = useCallback((newState: AppState) => {
     // Cleanup states when leaving certain modes
     if (appState === AppState.DOCUMENT_READER && newState !== AppState.DOCUMENT_READER) {
-        window.speechSynthesis.cancel();
+        if (window.speechSynthesis) {
+            try {
+                window.speechSynthesis.cancel();
+            } catch (e) {
+                console.error("Failed to cancel speech synthesis:", e);
+            }
+        }
         setIsReading(false);
     }
     // Cleanup Navigation state if leaving navigation
@@ -162,6 +193,11 @@ export default function App() {
 
   // --- Sensor Simulation / ESP32 Logic ---
   useEffect(() => {
+    if (connectedBleDevice) {
+      setSettings(prev => ({ ...prev, sensorConnected: true }));
+      return;
+    }
+
     if (settings.useEsp32Cam) {
         // If ESP32 is active, we assume it's "Connecting..." or we let the image load event handle it
         // For simulation purposes, we set it to true immediately if a URL is present
@@ -173,15 +209,63 @@ export default function App() {
     } else {
         // Legacy simulation for internal sensor connection after 5 seconds
         const timer = setTimeout(() => {
-          setSettings(prev => ({ ...prev, sensorConnected: true }));
+          setSettings(prev => {
+            if (connectedBleDevice) return prev;
+            return { ...prev, sensorConnected: true };
+          });
           // Only announce if we aren't in a blocking flow
-          if (appState === AppState.IDLE_LISTENING) {
+          if (appState === AppState.IDLE_LISTENING && !connectedBleDevice) {
             speak("Internal Sensor connected");
           }
         }, 5000);
         return () => clearTimeout(timer);
     }
-  }, [appState, speak, settings.useEsp32Cam, settings.esp32CamUrl]);
+  }, [appState, speak, settings.useEsp32Cam, settings.esp32CamUrl, connectedBleDevice]);
+
+  // --- Bluetooth Service Lifecycle & Telemetry ---
+  useEffect(() => {
+    const ble = BluetoothService.getInstance();
+    ble.initialize().catch(err => console.error('[BLE App] Init error:', err));
+  }, []);
+
+  useEffect(() => {
+    if (!connectedBleDevice) return;
+
+    const ble = BluetoothService.getInstance();
+    const serviceUuid = '19b10000-e8f2-537e-4f6c-d104768a1214';
+    const charUuid = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
+    console.log('[BLE App] Subscribing to telemetry distance...');
+    ble.startTelemetryNotifications(
+      connectedBleDevice.deviceId,
+      serviceUuid,
+      charUuid,
+      (distance) => {
+        setCurrentDistance(distance);
+        if (distance < 0.8) {
+          setObstacleWarning(true);
+          const now = Date.now();
+          if (now - lastObstacleSpeakRef.current > 8000) {
+            speak(`Warning: Obstacle detected within ${distance.toFixed(1)} meters!`);
+            lastObstacleSpeakRef.current = now;
+          }
+        } else {
+          setObstacleWarning(false);
+        }
+      }
+    ).catch(err => {
+      console.error('[BLE App] Subscription error:', err);
+    });
+
+    return () => {
+      console.log('[BLE App] Cleaning up telemetry subscription...');
+      ble.stopTelemetryNotifications(
+        connectedBleDevice.deviceId,
+        serviceUuid,
+        charUuid
+      ).catch(err => console.error('[BLE App] Unsubscription error:', err));
+    };
+  }, [connectedBleDevice, speak]);
 
   // --- Navigation & Location Logic ---
   const startNavigation = useCallback((destination: string) => {
@@ -239,22 +323,26 @@ export default function App() {
         break;
 
       case AppState.ONBOARDING_WELCOME:
+        setDisplayText("Welcome to Elenii!\n\nPlease say your name, or type it below to get started.");
         speak("Welcome to Elenii. Say your name.");
         startListening(true);
         break;
 
       case AppState.ONBOARDING_LANGUAGE:
+        setDisplayText("Select your preferred language:\n\nSay English, Hausa, Igbo, or Yoruba (or tap below).");
         speak("Choose your language: English, Hausa, Igbo, or Yoruba.");
         startListening(true);
         break;
       
       case AppState.ONBOARDING_PERMISSION:
+        setDisplayText("Grant hardware permissions to enable full assistant features:\n\nSay 'Continue' or tap below to grant.");
         speak("I will use your microphone and camera to help you. Say Continue.");
         startListening(true);
         break;
 
       case AppState.ONBOARDING_COMPLETE:
         localStorage.setItem('elenii_visited', 'true');
+        setDisplayText("Setup complete!\n\nYou're ready to use Elenii Shepherd.");
         speak("You can say: Go to [place], Scan ahead, News, Radio, Health, Reader, or Settings.");
         const t = setTimeout(() => transitionTo(AppState.IDLE_LISTENING), 6000);
         return () => clearTimeout(t);
@@ -340,21 +428,45 @@ export default function App() {
   }, [appState, activeFeatureIndex]);
 
   // --- Internal Camera Initialization ---
-  useEffect(() => {
-    // We always initialize internal camera just in case, or if user toggles off ESP32
-    const initCamera = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { facingMode: 'environment' } 
-        });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      } catch (e) {
-        console.error("Camera error", e);
+  const initCamera = useCallback(async () => {
+    // Avoid double initialization if stream is already active and track is running
+    if (streamRef.current && streamRef.current.getVideoTracks().some(track => track.readyState === 'live')) {
+      if (videoRef.current && videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+        videoRef.current.play().catch(playErr => console.error("Video play failed:", playErr));
       }
-    };
+      return;
+    }
+
+    let stream: MediaStream | null = null;
+    try {
+      // Try environment (rear) camera first
+      stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'environment' } 
+      });
+    } catch (e) {
+      console.warn("Rear camera failed, trying default video source...", e);
+      try {
+        // Fallback 1: Any available video camera (default)
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      } catch (err) {
+        console.error("All camera fallback options failed:", err);
+      }
+    }
+
+    if (stream) {
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        // Explicitly trigger play to prevent freeze or black screen on WebViews
+        videoRef.current.play().catch(playErr => {
+          console.error("Video play failed on stream init:", playErr);
+        });
+      }
+    }
+  }, []);
+
+  useEffect(() => {
     initCamera();
 
     return () => {
@@ -363,14 +475,27 @@ export default function App() {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, [initCamera]);
 
-  // Ensure stream is attached if video element re-renders
+  // Ensure stream is attached and playing whenever state shifts or camera is needed
   useEffect(() => {
-    if (videoRef.current && streamRef.current && !videoRef.current.srcObject) {
-      videoRef.current.srcObject = streamRef.current;
+    const isCameraState = 
+        appState === AppState.IDLE_LISTENING || 
+        appState === AppState.NAVIGATION_SCAN || 
+        appState === AppState.NAVIGATION_MODE || 
+        appState === AppState.NAVIGATION_RESULT;
+
+    if (isCameraState) {
+      if (!streamRef.current) {
+        initCamera();
+      } else if (videoRef.current) {
+        if (videoRef.current.srcObject !== streamRef.current) {
+          videoRef.current.srcObject = streamRef.current;
+        }
+        videoRef.current.play().catch(e => console.error("Error playing video:", e));
+      }
     }
-  }, [appState, settings.useEsp32Cam]); 
+  }, [appState, settings.useEsp32Cam, initCamera]);
 
   // --- Capture Helpers ---
   const captureImage = (): string | null => {
@@ -752,6 +877,59 @@ export default function App() {
             transitionTo(AppState.SETTINGS);
             return;
         }
+        else if (text.includes('bluetooth') || text.includes('sensor connection') || text.includes('cane settings')) {
+            transitionTo(AppState.SETTINGS_BLUETOOTH);
+            return;
+        }
+        else if (text.includes('connect to sensor') || text.includes('connect sensor')) {
+            speak("Scanning and connecting to cane sensor.");
+            const ble = BluetoothService.getInstance();
+            transitionTo(AppState.SETTINGS_BLUETOOTH);
+            setIsBleScanning(true);
+            setDiscoveredDevices([]);
+            ble.startScan((dev) => {
+                setDiscoveredDevices(prev => {
+                    if (prev.some(d => d.deviceId === dev.deviceId)) return prev;
+                    return [...prev, dev];
+                });
+                
+                if (dev.name.includes('Smart Cane') || dev.name.includes('Cane') || dev.name.includes('Sensor')) {
+                    ble.stopScan().catch(() => {});
+                    setIsBleScanning(false);
+                    speak(`Connecting to ${dev.name}`);
+                    ble.connect(dev.deviceId, () => {
+                        setSettings(s => ({ ...s, sensorConnected: false }));
+                        setConnectedBleDevice(null);
+                        setCurrentDistance(null);
+                        setObstacleWarning(false);
+                    }).then((connectedDev) => {
+                        setSettings(s => ({ ...s, sensorConnected: true, bluetoothDeviceName: connectedDev.name, bluetoothDeviceAddress: connectedDev.deviceId }));
+                        setConnectedBleDevice(connectedDev);
+                    }).catch(() => {
+                        speak("Failed to connect.");
+                    });
+                }
+            }).catch(() => {
+                setIsBleScanning(false);
+                speak("Could not start Bluetooth scan.");
+            });
+            return;
+        }
+        else if (text.includes('disconnect sensor') || text.includes('disconnect bluetooth')) {
+            if (connectedBleDevice) {
+                const ble = BluetoothService.getInstance();
+                ble.disconnect(connectedBleDevice.deviceId).then(() => {
+                    setSettings(s => ({ ...s, sensorConnected: false }));
+                    setConnectedBleDevice(null);
+                    setCurrentDistance(null);
+                    setObstacleWarning(false);
+                    speak("Sensor disconnected.");
+                });
+            } else {
+                speak("No sensor is connected.");
+            }
+            return;
+        }
     }
 
     // 6. ONBOARDING & INPUTS (Specific state traps)
@@ -821,9 +999,84 @@ export default function App() {
     // 1. Onboarding
     if (appState.toString().startsWith('ONBOARDING')) {
       return (
-        <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 space-y-8 bg-zinc-950 z-20">
-            <h1 className="text-3xl font-bold text-[#2D6A94]">Elenii</h1>
-            <p className="text-2xl">{displayText}</p>
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-8 space-y-8 bg-zinc-950/95 backdrop-blur-xl z-20 overflow-hidden relative">
+            {/* Ambient Background Aura */}
+            <div className="absolute w-48 h-48 rounded-full bg-[#2D6A94]/10 blur-2xl top-1/4 animate-pulse"></div>
+
+            {/* Glowing Logo Halo */}
+            <div className="relative shrink-0">
+              <div className="absolute -inset-4 rounded-full bg-[#2D6A94]/10 blur-md animate-[ping_3s_infinite_1s]"></div>
+              <div className="w-20 h-20 rounded-full bg-zinc-900 border border-white/10 flex items-center justify-center text-white relative shadow-2xl">
+                 <IconMic />
+              </div>
+            </div>
+            
+            <div className="space-y-4 w-full max-w-sm">
+                <span className="font-title font-black text-xs uppercase tracking-[0.25em] text-[#2D6A94] drop-shadow-[0_0_8px_rgba(45,106,148,0.3)]">ELENII SETUP</span>
+                
+                {/* Glassmorphic Guidance Card */}
+                <div className="bg-zinc-900/60 border border-white/5 p-6 rounded-2xl shadow-xl backdrop-blur-md">
+                    <p className="text-xl font-bold leading-snug text-zinc-100 font-sans whitespace-pre-line">{displayText}</p>
+                </div>
+
+                {/* Tactile Manual Inputs and Buttons (Premium Fallback) */}
+                <div className="pt-4 space-y-3 pointer-events-auto">
+                    {appState === AppState.ONBOARDING_WELCOME && (
+                        <div className="space-y-3">
+                            <input 
+                                type="text"
+                                placeholder="Your name (optional)..."
+                                className="w-full bg-zinc-900/80 border border-white/10 rounded-xl p-3 text-center text-white outline-none focus:border-[#2D6A94] transition-colors"
+                                value={settings.name}
+                                onChange={(e) => setSettings(s => ({ ...s, name: e.target.value }))}
+                            />
+                            <button 
+                                onClick={() => transitionTo(AppState.ONBOARDING_LANGUAGE)}
+                                className="w-full bg-white text-zinc-950 font-bold py-3 rounded-xl hover:bg-zinc-200 active:scale-95 transition-all shadow-lg"
+                            >
+                                Continue
+                            </button>
+                        </div>
+                    )}
+
+                    {appState === AppState.ONBOARDING_LANGUAGE && (
+                        <div className="grid grid-cols-2 gap-2">
+                            {Object.values(Language).map((lang) => (
+                                <button 
+                                    key={lang}
+                                    onClick={() => {
+                                        setSettings(s => ({ ...s, language: lang }));
+                                        transitionTo(AppState.ONBOARDING_PERMISSION);
+                                    }}
+                                    className="bg-zinc-900/80 border border-white/5 font-semibold py-3 px-4 rounded-xl hover:bg-zinc-800 hover:border-white/10 active:scale-95 transition-all text-white"
+                                >
+                                    {lang.toUpperCase()}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {appState === AppState.ONBOARDING_PERMISSION && (
+                        <button 
+                            onClick={() => transitionTo(AppState.ONBOARDING_COMPLETE)}
+                            className="w-full bg-[#2D6A94] text-white font-bold py-3.5 rounded-xl hover:bg-[#235374] active:scale-95 transition-all shadow-lg shadow-[#2D6A94]/20 border border-white/10"
+                        >
+                            Grant and Continue
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            {/* Quick Skip Button at the very bottom */}
+            <button 
+                onClick={() => {
+                    localStorage.setItem('elenii_visited', 'true');
+                    transitionTo(AppState.IDLE_LISTENING);
+                }}
+                className="text-xs text-zinc-500 hover:text-zinc-300 pointer-events-auto transition-colors font-medium tracking-wider uppercase underline decoration-zinc-700 underline-offset-4"
+            >
+                Skip Onboarding
+            </button>
         </div>
       );
     }
@@ -1327,7 +1580,8 @@ export default function App() {
       const title = appState === AppState.SETTINGS ? "Settings" :
                     appState === AppState.SETTINGS_LANGUAGE ? "Language" :
                     appState === AppState.SETTINGS_PROFILE ? "Profile" :
-                    appState === AppState.SETTINGS_SUBSCRIPTION ? "Subscription" : "Settings";
+                    appState === AppState.SETTINGS_SUBSCRIPTION ? "Subscription" :
+                    appState === AppState.SETTINGS_BLUETOOTH ? "Bluetooth Cane" : "Settings";
 
       const handleBack = () => {
           if (isSubMenu) transitionTo(AppState.SETTINGS);
@@ -1399,7 +1653,7 @@ export default function App() {
 
                               <SettingsItem label="Subscription Plan" value={settings.isSubscribed ? "Premium" : "Free"} onClick={() => transitionTo(AppState.SETTINGS_SUBSCRIPTION)} />
                               <SettingsItem label="Language" value={settings.language} onClick={() => transitionTo(AppState.SETTINGS_LANGUAGE)} />
-                              <SettingsItem label="Sensor Connection" value={settings.sensorConnected ? "Connected" : "Disconnected"} onClick={() => speak("Sensor status is " + (settings.sensorConnected ? "Connected" : "Disconnected"))} />
+                              <SettingsItem label="Bluetooth Cane Sensor" value={connectedBleDevice ? `Connected (${connectedBleDevice.name})` : "Not Paired"} onClick={() => transitionTo(AppState.SETTINGS_BLUETOOTH)} />
                           </div>
                           
                           <div className="mt-8 text-center">
@@ -1475,149 +1729,330 @@ export default function App() {
                           </button>
                       </div>
                   )}
+
+                  {appState === AppState.SETTINGS_BLUETOOTH && (
+                      <div className="space-y-4">
+                           {/* Scan Status & Telemetry Header */}
+                           <div className="p-5 bg-zinc-900 rounded-2xl border border-zinc-800 space-y-4 shadow-lg relative overflow-hidden">
+                               <div className="flex items-center justify-between">
+                                   <div>
+                                       <span className="text-xs uppercase font-extrabold tracking-widest text-[#2D6A94] block">Bluetooth Status</span>
+                                       <h2 className="text-xl font-bold text-white mt-0.5">
+                                           {connectedBleDevice ? 'Connected' : (isBleScanning ? 'Scanning...' : 'Offline')}
+                                       </h2>
+                                   </div>
+                                   <div className="flex gap-2">
+                                       <button
+                                           onClick={async () => {
+                                               const ble = BluetoothService.getInstance();
+                                               if (isBleScanning) {
+                                                   await ble.stopScan();
+                                                   setIsBleScanning(false);
+                                               } else {
+                                                   setIsBleScanning(true);
+                                                   setDiscoveredDevices([]);
+                                                   speak("Scanning for devices...");
+                                                   try {
+                                                       await ble.startScan((dev) => {
+                                                           setDiscoveredDevices(prev => {
+                                                               if (prev.some(d => d.deviceId === dev.deviceId)) return prev;
+                                                               return [...prev, dev];
+                                                           });
+                                                       });
+                                                   } catch (e) {
+                                                       setIsBleScanning(false);
+                                                       speak("Bluetooth scan failed.");
+                                                   }
+                                               }
+                                           }}
+                                           className={`px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all active:scale-95 ${isBleScanning ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' : 'bg-[#2D6A94] text-white'}`}
+                                       >
+                                           {isBleScanning ? 'Stop' : 'Scan'}
+                                       </button>
+                                   </div>
+                               </div>
+
+                               {/* Scanning animated pulsing circles */}
+                               {isBleScanning && (
+                                   <div className="flex items-center justify-center py-4 relative h-16">
+                                       <div className="absolute w-12 h-12 rounded-full border border-cyan-500/40 animate-ping"></div>
+                                       <div className="absolute w-8 h-8 rounded-full border border-[#2D6A94]/60 animate-pulse"></div>
+                                       <div className="w-4 h-4 rounded-full bg-cyan-400 animate-pulse z-10 shadow-[0_0_10px_rgba(34,211,238,0.8)]"></div>
+                                   </div>
+                               )}
+
+                               {/* Active connected telemetry */}
+                               {connectedBleDevice && (
+                                   <div className="pt-3 border-t border-zinc-800 space-y-3">
+                                       <div className="flex justify-between items-center bg-zinc-950/40 p-3 rounded-xl border border-white/5">
+                                           <div className="flex flex-col">
+                                               <span className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">Device Telemetry</span>
+                                               <span className="text-zinc-300 text-sm font-bold truncate max-w-[180px]">{connectedBleDevice.name}</span>
+                                           </div>
+                                           <div className="flex flex-col items-end">
+                                               <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Distance</span>
+                                               <span className={`text-base font-black ${obstacleWarning ? 'text-red-400 animate-pulse' : 'text-emerald-400'}`}>
+                                                   {currentDistance !== null ? `${currentDistance.toFixed(2)}m` : 'Measuring...'}
+                                               </span>
+                                           </div>
+                                       </div>
+                                       
+                                       {/* Signal RSSI Indicator */}
+                                       <div className="flex items-center justify-between text-xs text-zinc-400 px-1">
+                                           <div className="flex items-center gap-1.5">
+                                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                                               <span>GATT Telemetry Active</span>
+                                           </div>
+                                           <span>Signal: -58 dBm (Excellent)</span>
+                                       </div>
+                                   </div>
+                               )}
+                           </div>
+
+                           {/* Device Discovery List */}
+                           <div className="space-y-2">
+                               <h3 className="text-xs uppercase font-extrabold tracking-widest text-zinc-500 px-1">Discovered BLE Devices</h3>
+                               
+                               {discoveredDevices.length === 0 ? (
+                                   <div className="p-8 text-center bg-zinc-900/40 rounded-2xl border border-zinc-800/40">
+                                       <span className="text-zinc-600 text-3xl block mb-2">📡</span>
+                                       <p className="text-zinc-500 text-sm font-semibold">No devices visible</p>
+                                       <p className="text-zinc-600 text-xs mt-1">Tap 'Scan' above to start searching.</p>
+                                   </div>
+                               ) : (
+                                   <div className="space-y-2">
+                                       {discoveredDevices.map((dev) => {
+                                           const isConnected = connectedBleDevice?.deviceId === dev.deviceId;
+                                           return (
+                                               <div 
+                                                   key={dev.deviceId}
+                                                   className={`flex items-center justify-between p-4 rounded-xl border transition-all ${isConnected ? 'bg-[#2D6A94]/10 border-[#2D6A94]/50' : 'bg-zinc-900 border-zinc-800'}`}
+                                               >
+                                                   <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                                                       <div className="p-2.5 bg-zinc-800 rounded-lg shrink-0">
+                                                           <IconBluetooth connected={isConnected} />
+                                                       </div>
+                                                       <div className="min-w-0">
+                                                           <span className="font-bold text-sm text-white block truncate">{dev.name}</span>
+                                                           <span className="text-xs text-zinc-500 block font-mono">{dev.deviceId}</span>
+                                                       </div>
+                                                   </div>
+                                                   
+                                                   <button
+                                                       onClick={async () => {
+                                                           const ble = BluetoothService.getInstance();
+                                                           if (isConnected) {
+                                                               speak("Disconnecting.");
+                                                               await ble.disconnect(dev.deviceId);
+                                                               setSettings(s => ({ ...s, sensorConnected: false }));
+                                                               setConnectedBleDevice(null);
+                                                               setCurrentDistance(null);
+                                                               setObstacleWarning(false);
+                                                           } else {
+                                                               speak("Connecting to cane sensor.");
+                                                               try {
+                                                                   const connectedDev = await ble.connect(dev.deviceId, () => {
+                                                                       setSettings(s => ({ ...s, sensorConnected: false }));
+                                                                       setConnectedBleDevice(null);
+                                                                       setCurrentDistance(null);
+                                                                       setObstacleWarning(false);
+                                                                   });
+                                                                   setSettings(s => ({ 
+                                                                       ...s, 
+                                                                       sensorConnected: true,
+                                                                       bluetoothDeviceName: connectedDev.name,
+                                                                       bluetoothDeviceAddress: connectedDev.deviceId
+                                                                   }));
+                                                                   setConnectedBleDevice(connectedDev);
+                                                               } catch (e) {
+                                                                   speak("Connection failed.");
+                                                               }
+                                                            }
+                                                       }}
+                                                       className={`px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all active:scale-95 shrink-0 ${isConnected ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}`}
+                                                   >
+                                                       {isConnected ? 'Disconnect' : 'Connect'}
+                                                   </button>
+                                               </div>
+                                           );
+                                       })}
+                                   </div>
+                               )}
+                           </div>
+                      </div>
+                  )}
               </div>
           </div>
       );
   };
 
   return (
-    <div className="h-[100dvh] w-full bg-zinc-950 text-white overflow-hidden flex flex-col font-sans relative">
-        
-        {/* BACKGROUND CAMERA LAYER - Conditionally render ESP32 Stream or Internal Video */}
-        {settings.useEsp32Cam ? (
-             <img 
-                ref={imgRef}
-                src={settings.esp32CamUrl}
-                className="absolute inset-0 w-full h-full object-cover z-0"
-                crossOrigin="anonymous"
-                alt="ESP32 Stream"
-             />
-        ) : (
-             <video 
-                ref={videoRef} 
-                autoPlay 
-                playsInline 
-                muted 
-                className="absolute inset-0 w-full h-full object-cover z-0"
-            />
-        )}
+    <MobileSimulator>
+      <div className="h-full w-full bg-zinc-950 text-white overflow-hidden flex flex-col font-sans relative">
+          
+          {/* OBSTACLE WARNING OVERLAYS */}
+          {obstacleWarning && (
+            <div className="absolute inset-0 bg-red-500/15 pointer-events-none z-20 animate-pulse border-4 border-red-500/40 rounded-3xl" />
+          )}
 
-        {/* HEADER */}
-        {!appState.toString().startsWith('SETTINGS') && appState !== AppState.RADIO_PLAYING && !appState.toString().startsWith('NEWS') && appState !== AppState.HEALTH_HOME && appState !== AppState.DESTINATION_INPUT && appState !== AppState.DOCUMENT_READER && (
-            <div className="h-14 px-4 flex items-center justify-between border-b border-zinc-800 shrink-0 bg-zinc-950/80 backdrop-blur-sm z-30 relative">
-                <span className="font-bold tracking-widest text-zinc-500">ELENII</span>
-                <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2 text-sm text-zinc-400">
-                        <IconSensor connected={settings.sensorConnected} />
-                        <span>{settings.sensorConnected ? (settings.useEsp32Cam ? 'ESP32' : 'Sensor') : 'No Sensor'}</span>
-                    </div>
-                    
-                    {/* Reader Button */}
-                    <button 
-                        onClick={() => {
-                            if (settings.isSubscribed) {
-                                transitionTo(AppState.DOCUMENT_READER);
-                            } else {
-                                transitionTo(AppState.PAYWALL);
-                            }
-                        }}
-                        className="p-2 mr-1 bg-zinc-800 text-white rounded-full hover:bg-zinc-700 transition-colors"
-                        aria-label="Document Reader"
-                    >
-                        <IconDocument />
-                    </button>
-
-                    {/* Health Button moved to Header */}
-                    <button 
-                        onClick={() => {
-                            if (settings.isSubscribed) {
-                                transitionTo(AppState.HEALTH_HOME);
-                            } else {
-                                transitionTo(AppState.PAYWALL);
-                            }
-                        }}
-                        className="p-2 mr-2 bg-red-600/10 text-red-500 rounded-full hover:bg-red-600/20 transition-colors"
-                        aria-label="Health Assistant"
-                    >
-                        <IconHealth className="w-6 h-6" />
-                    </button>
-
-                    <button onClick={() => transitionTo(AppState.SETTINGS)} className="p-2">
-                        <IconSettings />
-                    </button>
+          {obstacleWarning && currentDistance !== null && (
+            <div className="absolute top-16 left-4 right-4 bg-red-950/90 backdrop-blur-xl border border-red-500/40 p-4 rounded-2xl flex items-center justify-between shadow-2xl z-40 select-none">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl animate-pulse">⚠️</span>
+                <div>
+                  <span className="text-xs uppercase font-extrabold tracking-widest text-red-400 block">Collision Risk</span>
+                  <span className="font-bold text-white text-base">Obstacle {currentDistance.toFixed(2)}m Ahead</span>
                 </div>
+              </div>
+              <div className="px-3 py-1 bg-red-500/25 border border-red-500/40 rounded-full text-xs font-bold text-red-300">
+                Critical
+              </div>
             </div>
-        )}
+          )}
 
-        {/* MAIN CONTENT AREA - Overlays the camera */}
-        <main className="flex-1 overflow-hidden relative z-10">
-            {renderContent()}
-        </main>
-
-        {/* FOOTER */}
-        {appState !== AppState.DESTINATION_INPUT && appState !== AppState.DOCUMENT_READER && (
-            <div className="h-32 bg-zinc-900 border-t border-zinc-800 shrink-0 flex flex-col items-center justify-center pb-4 z-30 relative">
-                
-                <div className="flex items-center justify-evenly w-full px-2 mb-2">
-                    {/* Radio Button */}
-                    {!appState.toString().startsWith('ONBOARDING') && (
-                        <button 
-                            onClick={() => {
-                                if (settings.isSubscribed) {
-                                    setActiveFeatureIndex(0);
-                                    transitionTo(AppState.RADIO_PLAYING);
-                                } else {
-                                    transitionTo(AppState.PAYWALL);
-                                }
-                            }}
-                            className={`p-3 rounded-full transition-all ${appState === AppState.RADIO_PLAYING ? 'bg-[#2D6A94] text-white shadow-lg shadow-[#2D6A94]/20' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white'}`}
-                            aria-label="Radio"
-                        >
-                            <IconRadio />
-                        </button>
-                    )}
-
-                    {/* Dynamic Button (Press to Talk / Stop) */}
-                    <div className="relative">
-                        <button 
-                            onClick={() => isListening ? stopListening() : startListening()}
-                            className={`
-                                w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 transform active:scale-95
-                                ${isListening ? 'bg-red-500 shadow-red-900/50 shadow-lg' : 'bg-white text-black shadow-white/20 shadow-lg'}
-                            `}
-                        >
-                        {isListening ? <div className="w-6 h-6 bg-white rounded-sm" /> : <IconMic />}
-                        </button>
-                    </div>
-
-                    {/* News Button */}
-                    {!appState.toString().startsWith('ONBOARDING') && (
-                        <button 
-                            onClick={() => {
-                                setActiveFeatureIndex(0);
-                                transitionTo(settings.isSubscribed ? AppState.NEWS_FULL : AppState.NEWS_PREVIEW);
-                            }}
-                            className={`p-3 rounded-full transition-all ${appState === AppState.NEWS_FULL || appState === AppState.NEWS_PREVIEW ? 'bg-[#2D6A94] text-white shadow-lg shadow-[#2D6A94]/20' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white'}`}
-                            aria-label="News"
-                        >
-                            <IconNews />
-                        </button>
-                    )}
-                </div>
-
-                {/* Visualizer / Status Text */}
-                <div className="w-full px-8 h-8 flex items-center justify-center">
-                    {isListening ? (
-                        <Visualizer isActive={true} mode="listening" />
-                    ) : (
-                        <p className="text-zinc-500 text-sm font-medium uppercase tracking-widest">
-                            {isProcessing ? "Processing..." : "Tap mic to speak"}
-                        </p>
-                    )}
-                </div>
-            </div>
-        )}
-    </div>
+          {/* BACKGROUND CAMERA LAYER - Conditionally render ESP32 Stream or Internal Video */}
+          {settings.useEsp32Cam ? (
+               <img 
+                  ref={imgRef}
+                  src={settings.esp32CamUrl}
+                  className="absolute inset-0 w-full h-full object-cover z-0"
+                  crossOrigin="anonymous"
+                  alt="ESP32 Stream"
+               />
+          ) : (
+               <video 
+                  ref={videoRef} 
+                  autoPlay 
+                  playsInline 
+                  muted 
+                  className="absolute inset-0 w-full h-full object-cover z-0"
+              />
+          )}
+  
+          {/* HEADER */}
+          {!appState.toString().startsWith('SETTINGS') && appState !== AppState.RADIO_PLAYING && !appState.toString().startsWith('NEWS') && appState !== AppState.HEALTH_HOME && appState !== AppState.DESTINATION_INPUT && appState !== AppState.DOCUMENT_READER && (
+              <div className="h-14 px-4 flex items-center justify-between border-b border-white/5 shrink-0 bg-zinc-950/80 backdrop-blur-md z-30 relative select-none">
+                  <span className="font-title font-extrabold tracking-widest text-[#2D6A94] drop-shadow-[0_0_8px_rgba(45,106,148,0.3)]">ELENII</span>
+                  <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-1.5 text-xs bg-zinc-900/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/5 font-medium text-zinc-400">
+                          <IconBluetooth connected={settings.sensorConnected} />
+                          <span>{settings.sensorConnected ? (connectedBleDevice ? connectedBleDevice.name : 'Bluetooth') : 'Offline'}</span>
+                      </div>
+                      
+                      {/* Reader Button */}
+                      <button 
+                          onClick={() => {
+                              if (settings.isSubscribed) {
+                                  transitionTo(AppState.DOCUMENT_READER);
+                              } else {
+                                  transitionTo(AppState.PAYWALL);
+                              }
+                          }}
+                          className="p-2 bg-zinc-900/80 border border-white/5 text-zinc-300 rounded-full hover:bg-zinc-800 hover:text-white transition-all active:scale-90"
+                          aria-label="Document Reader"
+                      >
+                          <IconDocument />
+                      </button>
+  
+                      {/* Health Button moved to Header */}
+                      <button 
+                          onClick={() => {
+                              if (settings.isSubscribed) {
+                                  transitionTo(AppState.HEALTH_HOME);
+                              } else {
+                                  transitionTo(AppState.PAYWALL);
+                              }
+                          }}
+                          className="p-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-full hover:bg-red-500/25 hover:text-red-300 transition-all active:scale-90"
+                          aria-label="Health Assistant"
+                      >
+                          <IconHealth className="w-5 h-5" />
+                      </button>
+  
+                      <button 
+                        onClick={() => transitionTo(AppState.SETTINGS)} 
+                        className="p-2 text-zinc-300 hover:text-white transition-colors active:rotate-45 duration-300"
+                        aria-label="Settings"
+                      >
+                          <IconSettings />
+                      </button>
+                  </div>
+              </div>
+          )}
+  
+          {/* MAIN CONTENT AREA - Overlays the camera */}
+          <main className="flex-1 overflow-hidden relative z-10">
+              {renderContent()}
+          </main>
+  
+          {/* FOOTER */}
+          {appState !== AppState.DESTINATION_INPUT && appState !== AppState.DOCUMENT_READER && (
+              <div className="h-32 bg-zinc-950/90 backdrop-blur-xl border-t border-white/5 shrink-0 flex flex-col items-center justify-center pb-5 z-30 relative select-none">
+                  
+                  <div className="flex items-center justify-evenly w-full px-4 mb-3">
+                      {/* Radio Button */}
+                      {!appState.toString().startsWith('ONBOARDING') && (
+                          <button 
+                              onClick={() => {
+                                  if (settings.isSubscribed) {
+                                      setActiveFeatureIndex(0);
+                                      transitionTo(AppState.RADIO_PLAYING);
+                                  } else {
+                                      transitionTo(AppState.PAYWALL);
+                                  }
+                              }}
+                              className={`p-3.5 rounded-full transition-all border ${appState === AppState.RADIO_PLAYING ? 'bg-[#2D6A94] border-[#387fae] text-white shadow-lg shadow-[#2D6A94]/25 scale-105' : 'bg-zinc-900/60 border-white/5 text-zinc-400 hover:bg-zinc-800 hover:text-white active:scale-95'}`}
+                              aria-label="Radio"
+                          >
+                              <IconRadio />
+                          </button>
+                      )}
+  
+                      {/* Dynamic Button (Press to Talk / Stop) */}
+                      <div className="relative">
+                          {isListening && (
+                            <span className="absolute -inset-1 rounded-full bg-red-500/20 blur-md animate-pulse"></span>
+                          )}
+                          <button 
+                              onClick={() => isListening ? stopListening() : startListening()}
+                              className={`
+                                  w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 transform active:scale-95 z-10 relative border
+                                  ${isListening ? 'bg-red-500 border-red-400 text-white shadow-red-500/20 shadow-xl' : 'bg-white border-zinc-200 text-black shadow-white/10 shadow-xl hover:bg-zinc-100'}
+                              `}
+                          >
+                          {isListening ? <div className="w-5 h-5 bg-white rounded-xs animate-pulse" /> : <IconMic />}
+                          </button>
+                      </div>
+  
+                      {/* News Button */}
+                      {!appState.toString().startsWith('ONBOARDING') && (
+                          <button 
+                              onClick={() => {
+                                  setActiveFeatureIndex(0);
+                                  transitionTo(settings.isSubscribed ? AppState.NEWS_FULL : AppState.NEWS_PREVIEW);
+                              }}
+                              className={`p-3.5 rounded-full transition-all border ${appState === AppState.NEWS_FULL || appState === AppState.NEWS_PREVIEW ? 'bg-[#2D6A94] border-[#387fae] text-white shadow-lg shadow-[#2D6A94]/25 scale-105' : 'bg-zinc-900/60 border-white/5 text-zinc-400 hover:bg-zinc-800 hover:text-white active:scale-95'}`}
+                              aria-label="News"
+                          >
+                              <IconNews />
+                          </button>
+                      )}
+                  </div>
+  
+                  {/* Visualizer / Status Text */}
+                  <div className="w-full px-8 h-8 flex items-center justify-center">
+                      {isListening || isProcessing ? (
+                          <Visualizer isActive={isListening} mode={isListening ? 'listening' : 'processing'} />
+                      ) : (
+                          <p className="text-zinc-500 text-xs font-bold tracking-widest uppercase animate-pulse select-none">
+                              Tap mic to speak
+                          </p>
+                      )}
+                  </div>
+              </div>
+          )}
+      </div>
+    </MobileSimulator>
   );
 }
 

@@ -1,11 +1,31 @@
 import { GoogleGenAI, Chat } from "@google/genai";
+import { BACKEND_URL, isBackendConfigured } from "./apiConfig";
 
+// Local Direct SDK Client initialization
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-// Persistent chat session variable
 let chatSession: Chat | null = null;
 
+/**
+ * 1. Scene Analyzer: Understands environment directly ahead
+ */
 export const analyzeScene = async (base64Image: string): Promise<string> => {
+  if (isBackendConfigured()) {
+    console.log("[API Bridge] Routing analyzeScene to dedicated backend:", BACKEND_URL);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64Image })
+      });
+      if (!response.ok) throw new Error(`Backend returned status ${response.status}`);
+      const data = await response.json();
+      return data.analysis || data.text || "I am not sure what is ahead.";
+    } catch (error) {
+      console.error("[API Bridge] Scene analysis backend failed. Falling back to local SDK.", error);
+    }
+  }
+
+  // Local SDK Fallback
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
@@ -23,15 +43,34 @@ export const analyzeScene = async (base64Image: string): Promise<string> => {
         ]
       }
     });
-
     return response.text || "I am not sure what is ahead.";
   } catch (error) {
-    console.error("Gemini API Error:", error);
+    console.error("Gemini API Direct Error:", error);
     throw new Error("I can't connect right now.");
   }
 };
 
+/**
+ * 2. Document Reader OCR: Extracts editable text from images
+ */
 export const extractTextFromImage = async (base64Image: string): Promise<string> => {
+  if (isBackendConfigured()) {
+    console.log("[API Bridge] Routing extractTextFromImage to dedicated backend:", BACKEND_URL);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/ocr`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64Image })
+      });
+      if (!response.ok) throw new Error(`Backend returned status ${response.status}`);
+      const data = await response.json();
+      return data.text || "No text detected.";
+    } catch (error) {
+      console.error("[API Bridge] OCR backend failed. Falling back to local SDK.", error);
+    }
+  }
+
+  // Local SDK Fallback
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
@@ -49,15 +88,35 @@ export const extractTextFromImage = async (base64Image: string): Promise<string>
         ]
       }
     });
-
     return response.text || "No text detected.";
   } catch (error) {
-    console.error("Gemini OCR Error:", error);
+    console.error("Gemini OCR Direct Error:", error);
     throw new Error("Could not read text.");
   }
 };
 
+/**
+ * 3. Walking Directions Generator
+ */
 export const getWalkingDirections = async (originLat: number, originLng: number, destination: string): Promise<string[]> => {
+  if (isBackendConfigured()) {
+    console.log("[API Bridge] Routing getWalkingDirections to dedicated backend:", BACKEND_URL);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/navigate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude: originLat, longitude: originLng, destination })
+      });
+      if (!response.ok) throw new Error(`Backend returned status ${response.status}`);
+      const data = await response.json();
+      if (Array.isArray(data.steps)) return data.steps;
+      if (typeof data.text === 'string') return [data.text];
+    } catch (error) {
+      console.error("[API Bridge] Navigation backend failed. Falling back to local SDK.", error);
+    }
+  }
+
+  // Local SDK Fallback
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -76,24 +135,39 @@ export const getWalkingDirections = async (originLat: number, originLng: number,
     });
 
     const text = response.text || "";
-    // Clean and split the text into an array of steps
-    // Regex matches "1. ", "2. " etc.
     const steps = text.split(/\n\d+\.\s+/).filter(step => step.trim().length > 0);
-    
     if (steps.length === 0 && text.length > 0) {
-        return [text]; // Fallback if formatting failed
+      return [text];
     }
-    
     return steps;
   } catch (error) {
-    console.error("Gemini Navigation Error:", error);
+    console.error("Gemini Navigation Direct Error:", error);
     throw new Error("I couldn't calculate the route.");
   }
 };
 
+/**
+ * 4. Conversational Voice Chat Session
+ */
 export const chatWithElenii = async (userText: string, userName: string = ""): Promise<string> => {
+  if (isBackendConfigured()) {
+    console.log("[API Bridge] Routing chatWithElenii to dedicated backend:", BACKEND_URL);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: userText, name: userName })
+      });
+      if (!response.ok) throw new Error(`Backend returned status ${response.status}`);
+      const data = await response.json();
+      return data.response || data.text || "I didn't catch that.";
+    } catch (error) {
+      console.error("[API Bridge] Conversational backend failed. Falling back to local SDK Chat.", error);
+    }
+  }
+
+  // Local SDK Fallback
   try {
-    // Initialize session if it doesn't exist
     if (!chatSession) {
       chatSession = ai.chats.create({
         model: 'gemini-3-flash-preview',
@@ -118,10 +192,9 @@ export const chatWithElenii = async (userText: string, userName: string = ""): P
     const response = await chatSession.sendMessage({
       message: userText
     });
-
     return response.text || "I didn't catch that.";
   } catch (error) {
-    console.error("Gemini Chat Error:", error);
+    console.error("Gemini Chat Direct Error:", error);
     return "I'm having trouble connecting to my brain right now.";
   }
 };
